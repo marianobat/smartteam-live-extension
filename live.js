@@ -32,6 +32,61 @@
   }
 
   /**
+   * Read a querystring param from a given search string ("?a=b") safely.
+   */
+  function getQueryParamFromSearch(search, name) {
+    try {
+      const params = new URLSearchParams(search || "");
+      const v = params.get(name);
+      return v == null ? "" : String(v);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  /**
+   * Read room from window location, with fallbacks.
+   * This helps if parameters end up in hash or are set slightly after extension load.
+   */
+  function getRoomFromWindow() {
+    const fromSearch = getQueryParamFromSearch(window.location.search, "room");
+    if (fromSearch) return fromSearch;
+
+    const h = window.location.hash || "";
+    const qIndex = h.indexOf("?");
+    if (qIndex !== -1) {
+      const fromHashQuery = getQueryParamFromSearch(h.slice(qIndex), "room");
+      if (fromHashQuery) return fromHashQuery;
+    }
+    if (h.startsWith("#")) {
+      const fromHash = getQueryParamFromSearch(h.slice(1), "room");
+      if (fromHash) return fromHash;
+    }
+
+    return "";
+  }
+
+  /**
+   * Read a querystring param from the extension script URL (document.currentScript.src),
+   * so we can support passing room/wsBase via the extension URL too:
+   *   extension=https://host/live.js?room=ST-...&wsBase=wss://...
+   */
+  function getParamFromCurrentScript(name) {
+    try {
+      const src =
+        document.currentScript && document.currentScript.src
+          ? document.currentScript.src
+          : "";
+      if (!src) return "";
+      const u = new URL(src);
+      const v = u.searchParams.get(name);
+      return v == null ? "" : String(v);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  /**
    * Validate wsBase override:
    * Only allow ws:// or wss://. If invalid, return default.
    */
@@ -84,12 +139,12 @@
     return Object.is(r, -0) ? 0 : r;
   }
 
-  class SmartteamGesturesExtension {
+  class SmartteamLiveExtension {
     constructor() {
       // Internal state
       this._connected = false;
       this._room = "";
-      this._wsBase = normalizeWsBase(getQueryParam("wsBase"));
+      this._wsBase = DEFAULT_WS_BASE;
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
@@ -100,13 +155,28 @@
       this._reconnectTimer = null;
       this._backoffIndex = 0;
 
-      // Auto-connect from URL (?room=ST-...)
-      const urlRoom = normalizeRoom(getQueryParam("room"));
+      // Room probing (timing robustness)
+      this._roomProbeTimer = null;
+
+      // Read wsBase from editor URL first, then from extension URL.
+      const wsBaseFromEditor = getQueryParam("wsBase");
+      const wsBaseFromScript = getParamFromCurrentScript("wsBase");
+      this._wsBase = normalizeWsBase(wsBaseFromEditor || wsBaseFromScript);
+
+      // Auto-connect from URL (?room=ST-...) with fallbacks:
+      // 1) editor querystring
+      // 2) editor hash
+      // 3) extension script URL querystring
+      const roomFromEditor = normalizeRoom(getRoomFromWindow());
+      const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
+      const urlRoom = roomFromEditor || roomFromScript;
+
       if (urlRoom) {
         this.setRoomInternal(urlRoom, /*auto*/ true);
       } else {
-        // Protection: if room empty, do not connect.
+        // If room isn't available yet (timing), probe briefly then give up.
         this._connected = false;
+        this._startRoomProbe();
       }
     }
 
@@ -218,6 +288,41 @@
 
     // --- Internal logic ---
 
+    _startRoomProbe() {
+      // Try for ~5s to catch cases where the editor URL is updated shortly after extension load.
+      let tries = 0;
+      const maxTries = 20; // 20 * 250ms = 5 seconds
+      const intervalMs = 250;
+
+      if (this._roomProbeTimer) return;
+
+      this._roomProbeTimer = setInterval(() => {
+        tries += 1;
+
+        if (this._room) {
+          clearInterval(this._roomProbeTimer);
+          this._roomProbeTimer = null;
+          return;
+        }
+
+        const roomFromEditor = normalizeRoom(getRoomFromWindow());
+        const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
+        const found = roomFromEditor || roomFromScript;
+
+        if (found) {
+          clearInterval(this._roomProbeTimer);
+          this._roomProbeTimer = null;
+          this.setRoomInternal(found, /*auto*/ true);
+          return;
+        }
+
+        if (tries >= maxTries) {
+          clearInterval(this._roomProbeTimer);
+          this._roomProbeTimer = null;
+        }
+      }, intervalMs);
+    }
+
     setRoomInternal(room, auto) {
       // Protection: if empty, do not connect.
       if (!room) {
@@ -308,7 +413,6 @@
       }
 
       try {
-        // eslint-disable-next-line extension/check-can-fetch
         const ws = new WebSocket(wsUrl);
         this._ws = ws;
 
@@ -410,5 +514,5 @@
     }
   }
 
-  Scratch.extensions.register(new SmartteamGesturesExtension());
+  Scratch.extensions.register(new SmartteamLiveExtension());
 })(Scratch);
