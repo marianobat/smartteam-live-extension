@@ -94,6 +94,7 @@
       this._confidence = 0;
       this._subscribers = 0;
       this._classes = [];
+      this.getClassesMenu = this.getClassesMenu.bind(this);
 
       // WebSocket + reconnect handling
       this._ws = null;
