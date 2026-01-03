@@ -10,6 +10,11 @@
   "use strict";
 
   if (!Scratch) return;
+  if (!Scratch.extensions.unsandboxed) {
+    throw new Error(
+      Scratch.translate("SmartTEAM Live must run unsandboxed")
+    );
+  }
 
   const DEFAULT_WS_BASE =
     "wss://smartteam-gesture-bridge.marianobat.workers.dev/ws";
