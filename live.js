@@ -182,7 +182,7 @@
         ],
         menus: {
           classes: {
-            items: this._getClassesMenu.bind(this),
+            items: "getClassesMenu",
           },
         },
       };
@@ -451,7 +451,7 @@
       }, delay);
     }
 
-    _getClassesMenu() {
+    getClassesMenu() {
       if (!this._classes || this._classes.length === 0) {
         return [Scratch.translate("no classes")];
       }
@@ -475,4 +475,3 @@
 
   Scratch.extensions.register(new SmartteamGesturesExtension());
 })(Scratch);
-
