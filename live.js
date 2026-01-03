@@ -3,13 +3,8 @@
 // Description: Read real-time AI signals from a SmartTEAM WebSocket room (currently gestures).
 // By: marianobat <https://scratch.mit.edu/users/marianobat/>
 // License: MPL-2.0
-// Manual testing (sandboxed):
-// https://turbowarp.org/editor?extension=https%3A%2F%2Flocalhost%3A8000%2Fmarianobat%2Flive.js%3Froom%3DST-XXXX%26wsBase%3Dwss%3A%2F%2Fsmartteam-gesture-bridge.marianobat.workers.dev%2Fws
-//
-// Notes:
-// - In sandboxed mode, the extension cannot reliably read the editor URL (?room=...).
-// - To provide a default room value, pass room via the extension script URL:
-//   live.js?room=ST-... (URL-encoded inside the editor's extension= parameter)
+// Manual testing:
+// https://turbowarp.org/editor?extension=http://localhost:8000/marianobat/live.js&room=ST-XXXX&wsBase=wss://smartteam-gesture-bridge.marianobat.workers.dev/ws
 
 (function (Scratch) {
   "use strict";
@@ -23,31 +18,13 @@
   const BACKOFF_MS = [1000, 2000, 3000, 5000];
 
   /**
-   * Read a querystring param from a given search string ("?a=b") safely.
+   * Read a querystring param from current page.
+   * TurboWarp editor runs in a browser page with window.location.search.
    */
-  function getQueryParamFromSearch(search, name) {
+  function getQueryParam(name) {
     try {
-      const params = new URLSearchParams(search || "");
+      const params = new URLSearchParams(window.location.search || "");
       const v = params.get(name);
-      return v == null ? "" : String(v);
-    } catch (e) {
-      return "";
-    }
-  }
-
-  /**
-   * Read a param from the extension script URL (document.currentScript.src).
-   * This is the most reliable way to receive parameters in sandboxed mode.
-   */
-  function getParamFromCurrentScript(name) {
-    try {
-      const src =
-        document.currentScript && document.currentScript.src
-          ? document.currentScript.src
-          : "";
-      if (!src) return "";
-      const u = new URL(src);
-      const v = u.searchParams.get(name);
       return v == null ? "" : String(v);
     } catch (e) {
       return "";
@@ -63,7 +40,7 @@
     if (!raw) return DEFAULT_WS_BASE;
     try {
       const u = new URL(raw);
-      if (u.protocol === "ws:" || u.protocol === "wss:") return u.toString();
+      if (u.protocol === "ws:" || u.protocol === "wss:") return raw;
       return DEFAULT_WS_BASE;
     } catch (e) {
       return DEFAULT_WS_BASE;
@@ -71,7 +48,9 @@
   }
 
   /**
-   * Normalize room string (backend expects ST-... style).
+   * Normalize room string:
+   * - Trim
+   * - Keep as-is otherwise (backend expects ST-XXXXXXX style)
    */
   function normalizeRoom(room) {
     return String(room || "").trim();
@@ -89,7 +68,7 @@
   }
 
   /**
-   * Coerce to finite number.
+   * Coerce confidence to a finite number.
    */
   function toFiniteNumber(x, fallback) {
     const n = Number(x);
@@ -100,38 +79,21 @@
    * Round to 2 decimals for reporting.
    */
   function round2(n) {
+    // Avoid showing -0
     const r = Math.round(n * 100) / 100;
     return Object.is(r, -0) ? 0 : r;
   }
 
-  /**
-   * Scratch.canFetch is designed around http/https permissions.
-   * For ws/wss URLs, check permissions using an equivalent http/https URL.
-   */
-  function toCanFetchUrl(wsUrl) {
-    try {
-      const u = new URL(wsUrl);
-      if (u.protocol === "wss:") u.protocol = "https:";
-      else if (u.protocol === "ws:") u.protocol = "http:";
-      return u.toString();
-    } catch (e) {
-      return "";
-    }
-  }
-
-  class SmartteamLiveExtension {
+  class SmartteamGesturesExtension {
     constructor() {
       // Internal state
       this._connected = false;
       this._room = "";
-      this._wsBase = DEFAULT_WS_BASE;
+      this._wsBase = normalizeWsBase(getQueryParam("wsBase"));
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
-
-      // Default room shown in the "set room to" block.
-      // In sandboxed mode we cannot reliably read the editor URL.
-      this._defaultRoom = "";
+      this._classes = [];
 
       // WebSocket + reconnect handling
       this._ws = null;
@@ -139,18 +101,12 @@
       this._reconnectTimer = null;
       this._backoffIndex = 0;
 
-      // wsBase/room: ONLY from the extension script URL in sandboxed mode
-      const wsBaseFromScript = getParamFromCurrentScript("wsBase");
-      this._wsBase = normalizeWsBase(wsBaseFromScript);
-
-      const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
-      this._defaultRoom = roomFromScript || "";
-
-      // Do NOT auto-connect in sandboxed unless the room is provided via script URL.
-      // (You can still connect by using the "set room to" block.)
-      if (roomFromScript) {
-        this.setRoomInternal(roomFromScript, /*auto*/ true);
+      // Auto-connect from URL (?room=ST-...)
+      const urlRoom = normalizeRoom(getQueryParam("room"));
+      if (urlRoom) {
+        this.setRoomInternal(urlRoom, /*auto*/ true);
       } else {
+        // Protection: if room empty, do not connect.
         this._connected = false;
       }
     }
@@ -176,6 +132,22 @@
             text: Scratch.translate("gesture"),
           },
           {
+            opcode: "isClassActive",
+            blockType: Scratch.BlockType.BOOLEAN,
+            text: Scratch.translate("class [CLASS] active?"),
+            arguments: {
+              CLASS: {
+                type: Scratch.ArgumentType.STRING,
+                menu: "classes",
+                defaultValue:
+                  (this._classes &&
+                    this._classes[0] &&
+                    (this._classes[0].id || this._classes[0].name)) ||
+                  Scratch.translate("no classes"),
+              },
+            },
+          },
+          {
             opcode: "getConfidence",
             blockType: Scratch.BlockType.REPORTER,
             text: Scratch.translate("confidence"),
@@ -193,7 +165,7 @@
             arguments: {
               ROOM: {
                 type: Scratch.ArgumentType.STRING,
-                defaultValue: this._defaultRoom || "ST-XXXXXXX",
+                defaultValue: this._room || Scratch.translate("ST-XXXXXXX"),
               },
             },
           },
@@ -208,6 +180,11 @@
             text: Scratch.translate("disconnect"),
           },
         ],
+        menus: {
+          classes: {
+            items: this._getClassesMenu.bind(this),
+          },
+        },
       };
     }
 
@@ -233,6 +210,17 @@
       return toFiniteNumber(this._subscribers, 0);
     }
 
+    isClassActive(args) {
+      const cls = String(args.CLASS || "");
+      if (!cls) return false;
+      if (this._gesture === cls) return true;
+      const match = this._classes.find(
+        (entry) => entry.id === cls || entry.name === cls
+      );
+      if (!match) return false;
+      return this._gesture === match.id || this._gesture === match.name;
+    }
+
     // --- Commands ---
 
     setRoom(args) {
@@ -241,6 +229,7 @@
     }
 
     reconnect() {
+      // Explicit reconnect: close existing and attempt again using current room.
       if (!this._room) {
         this._connected = false;
         return;
@@ -253,6 +242,7 @@
     }
 
     disconnect() {
+      // Explicit disconnect: stop reconnecting and close socket.
       this._shouldReconnect = false;
       this._clearReconnectTimer();
       this._closeWs("manual disconnect");
@@ -262,10 +252,12 @@
     // --- Internal logic ---
 
     setRoomInternal(room, auto) {
+      // Protection: if empty, do not connect.
       if (!room) {
         this._room = "";
         this._connected = false;
 
+        // If user sets room empty manually, treat as disconnect.
         if (!auto) {
           this._shouldReconnect = false;
           this._clearReconnectTimer();
@@ -274,18 +266,16 @@
         return;
       }
 
-      // Keep default in sync for convenience (future blocks dragged out)
-      this._defaultRoom = room;
-
       // If unchanged, do nothing.
       if (room === this._room && this._ws) return;
 
       this._room = room;
 
-      // Reset values when room changes.
+      // Reset gesture values when room changes (avoid misleading stale data).
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
+      this._classes = [];
 
       // (Re)connect
       this._backoffIndex = 0;
@@ -296,7 +286,10 @@
     }
 
     _buildWsUrl() {
+      // wsBase is expected to be like wss://.../ws
       const base = this._wsBase || DEFAULT_WS_BASE;
+
+      // Build URL with ?room=... (no token, subscriber read-only)
       const u = new URL(base);
       u.searchParams.set("room", this._room);
       return u.toString();
@@ -311,6 +304,8 @@
         this._connected = false;
         return;
       }
+
+      // Only allow reconnect attempts if explicitly enabled.
       if (!this._shouldReconnect) {
         this._connected = false;
         return;
@@ -320,6 +315,7 @@
       try {
         wsUrl = this._buildWsUrl();
       } catch (e) {
+        // If URL building fails, fall back to default base and retry once.
         this._wsBase = DEFAULT_WS_BASE;
         try {
           wsUrl = this._buildWsUrl();
@@ -330,17 +326,9 @@
         }
       }
 
-      // Permission check (use http/https equivalent for ws/wss)
-      const canFetchUrl = toCanFetchUrl(wsUrl);
-      if (!canFetchUrl) {
-        this._connected = false;
-        this._scheduleReconnect();
-        return;
-      }
-
       let allowed = false;
       try {
-        allowed = await Scratch.canFetch(canFetchUrl);
+        allowed = await Scratch.canFetch(wsUrl);
       } catch (e) {
         this._connected = false;
         this._scheduleReconnect();
@@ -354,23 +342,47 @@
       }
 
       try {
+        // eslint-disable-next-line extension/check-can-fetch
         const ws = new WebSocket(wsUrl);
         this._ws = ws;
 
         ws.onopen = () => {
           this._connected = true;
-          this._backoffIndex = 0;
+          this._backoffIndex = 0; // reset backoff after successful open
         };
 
         ws.onmessage = (evt) => {
+          // Parse and update internal state
           const msg = safeJsonParse(evt.data);
           if (!msg || typeof msg !== "object") return;
 
+          // Ignore everything except gesture & presence
           if (msg.type === "gesture") {
+            // Accept missing fields (room/seq/ts). Normalize what we use.
             const label = typeof msg.label === "string" ? msg.label : "";
             const conf = toFiniteNumber(msg.confidence, 0);
+
             this._gesture = label;
             this._confidence = conf;
+          } else if (msg.type === "classes") {
+            const classes = Array.isArray(msg.classes) ? msg.classes : [];
+            this._classes = classes
+              .map((item) => {
+                if (typeof item === "string") {
+                  return { id: item, name: item };
+                }
+                if (!item || typeof item !== "object") return null;
+                const id =
+                  typeof item.id === "string" ? item.id : "";
+                const name =
+                  typeof item.name === "string" ? item.name : "";
+                if (!id && !name) return null;
+                return {
+                  id: id || name,
+                  name: name || id,
+                };
+              })
+              .filter((entry) => entry);
           } else if (msg.type === "presence") {
             const subs = toFiniteNumber(msg.subscribers, this._subscribers);
             this._subscribers = subs;
@@ -378,6 +390,7 @@
         };
 
         ws.onerror = () => {
+          // Some browsers also call onclose; we handle robustly there.
           this._connected = false;
         };
 
@@ -394,6 +407,8 @@
     }
 
     _closeWs(reason) {
+      // Close without triggering reconnect logic beyond existing schedule,
+      // but onclose handler will still run; we guard with _shouldReconnect.
       const ws = this._ws;
       this._ws = null;
 
@@ -413,11 +428,14 @@
     _scheduleReconnect() {
       if (!this._shouldReconnect) return;
       if (!this._room) return;
+
+      // If already scheduled, don't schedule another.
       if (this._reconnectTimer) return;
 
       const idx = Math.min(this._backoffIndex, BACKOFF_MS.length - 1);
       const delay = BACKOFF_MS[idx];
 
+      // Increase backoff for next time (capped).
       this._backoffIndex = Math.min(
         this._backoffIndex + 1,
         BACKOFF_MS.length - 1
@@ -425,11 +443,22 @@
 
       this._reconnectTimer = setTimeout(() => {
         this._reconnectTimer = null;
+        // If a socket appeared in the meantime or reconnect disabled, skip.
         if (this._ws) return;
         if (!this._shouldReconnect) return;
         if (!this._room) return;
         this._openWs();
       }, delay);
+    }
+
+    _getClassesMenu() {
+      if (!this._classes || this._classes.length === 0) {
+        return [Scratch.translate("no classes")];
+      }
+      return this._classes.map((entry) => ({
+        text: entry.name,
+        value: entry.id || entry.name,
+      }));
     }
 
     _clearReconnectTimer() {
@@ -444,5 +473,5 @@
     }
   }
 
-  Scratch.extensions.register(new SmartteamLiveExtension());
+  Scratch.extensions.register(new SmartteamGesturesExtension());
 })(Scratch);
