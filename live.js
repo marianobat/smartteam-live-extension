@@ -16,6 +16,35 @@
 
   if (!Scratch) return;
 
+  const translations = {
+    en: {
+      "SmartTEAM Live": "SmartTEAM Live",
+      room: "room",
+      "connected?": "connected?",
+      class: "class",
+      confidence: "confidence",
+      subscribers: "subscribers",
+      "set room to [ROOM]": "set room to [ROOM]",
+      reconnect: "reconnect",
+      disconnect: "disconnect",
+    },
+    es: {
+      "SmartTEAM Live": "SmartTEAM En Vivo",
+      room: "sala",
+      "connected?": "conectado?",
+      class: "clase",
+      confidence: "confianza",
+      subscribers: "suscriptores",
+      "set room to [ROOM]": "fijar sala a [ROOM]",
+      reconnect: "reconectar",
+      disconnect: "desconectar",
+    },
+  };
+
+  if (Scratch.translate && Scratch.translate.setup) {
+    Scratch.translate.setup(translations);
+  }
+
   const DEFAULT_WS_BASE =
     "wss://smartteam-gesture-bridge.marianobat.workers.dev/ws";
 
@@ -153,6 +182,8 @@
       } else {
         this._connected = false;
       }
+
+      this._ensureClassMonitor();
     }
 
     getInfo() {
@@ -173,7 +204,7 @@
           {
             opcode: "getGesture",
             blockType: Scratch.BlockType.REPORTER,
-            text: Scratch.translate("gesture"),
+            text: Scratch.translate("class"),
           },
           {
             opcode: "getConfidence",
@@ -440,6 +471,53 @@
           // ignore
         }
         this._reconnectTimer = null;
+      }
+    }
+
+    _ensureClassMonitor() {
+      const runtime = Scratch.vm && Scratch.vm.runtime;
+      if (!runtime) return;
+
+      const monitorId = "smartteamlive:class";
+      const monitorState = runtime._monitorState;
+      if (monitorState && monitorState[monitorId]) return;
+
+      const target =
+        typeof runtime.getTargetForStage === "function"
+          ? runtime.getTargetForStage()
+          : typeof runtime.getEditingTarget === "function"
+          ? runtime.getEditingTarget()
+          : null;
+
+      const monitor = {
+        id: monitorId,
+        opcode: "getGesture",
+        params: {},
+        targetId: target && target.id ? target.id : null,
+        spriteName:
+          target && target.sprite && target.sprite.name
+            ? target.sprite.name
+            : null,
+        mode: "default",
+        value: "",
+        visible: true,
+      };
+
+      try {
+        if (typeof runtime.requestAddMonitor === "function") {
+          runtime.requestAddMonitor(monitor);
+          return;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      try {
+        if (typeof runtime._monitorBlock === "function") {
+          runtime._monitorBlock(monitor);
+        }
+      } catch (e) {
+        // ignore
       }
     }
   }
