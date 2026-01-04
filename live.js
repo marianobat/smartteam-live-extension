@@ -21,10 +21,12 @@
       "SmartTEAM Live": "SmartTEAM Live",
       room: "room",
       "connected?": "connected?",
+      model: "model",
       class: "class",
       confidence: "confidence",
       subscribers: "subscribers",
       "set room to [ROOM]": "set room to [ROOM]",
+      "set model to [MODEL]": "set model to [MODEL]",
       reconnect: "reconnect",
       disconnect: "disconnect",
     },
@@ -32,10 +34,12 @@
       "SmartTEAM Live": "SmartTEAM En Vivo",
       room: "sala",
       "connected?": "conectado?",
+      model: "modelo",
       class: "clase",
       confidence: "confianza",
       subscribers: "suscriptores",
       "set room to [ROOM]": "fijar sala a [ROOM]",
+      "set model to [MODEL]": "fijar modelo a [MODEL]",
       reconnect: "reconectar",
       disconnect: "desconectar",
     },
@@ -50,6 +54,8 @@
 
   // Backoff sequence (ms). Cap is handled by last value.
   const BACKOFF_MS = [1000, 2000, 3000, 5000];
+
+  const ALLOWED_MODELS = ["hands", "text", "image", "face", "pose"];
 
   /**
    * Read a querystring param from a given search string ("?a=b") safely.
@@ -107,6 +113,15 @@
   }
 
   /**
+   * Normalize model id. If invalid, return fallback.
+   */
+  function normalizeModelId(modelId, fallback) {
+    const raw = String(modelId || "").trim().toLowerCase();
+    if (ALLOWED_MODELS.indexOf(raw) !== -1) return raw;
+    return fallback || "";
+  }
+
+  /**
    * Safe parse JSON. Returns null on failure.
    */
   function safeJsonParse(text) {
@@ -157,6 +172,9 @@
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
+      this._modelId = "hands";
+      this._lastModelId = "";
+      this._scores = null;
 
       // Default room shown in the "set room to" block.
       // In sandboxed mode we cannot reliably read the editor URL.
@@ -202,6 +220,11 @@
             text: Scratch.translate("connected?"),
           },
           {
+            opcode: "getModel",
+            blockType: Scratch.BlockType.REPORTER,
+            text: Scratch.translate("model"),
+          },
+          {
             opcode: "getGesture",
             blockType: Scratch.BlockType.REPORTER,
             text: Scratch.translate("class"),
@@ -224,7 +247,18 @@
             arguments: {
               ROOM: {
                 type: Scratch.ArgumentType.STRING,
-                defaultValue: this._defaultRoom || "ST-XXXXXXX",
+                defaultValue: this._defaultRoom || "ST-XXXX",
+              },
+            },
+          },
+          {
+            opcode: "setModel",
+            blockType: Scratch.BlockType.COMMAND,
+            text: Scratch.translate("set model to [MODEL]"),
+            arguments: {
+              MODEL: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: this._modelId || "hands",
               },
             },
           },
@@ -256,6 +290,10 @@
       return this._gesture || "";
     }
 
+    getModel() {
+      return this._modelId || "hands";
+    }
+
     getConfidence() {
       return round2(toFiniteNumber(this._confidence, 0));
     }
@@ -269,6 +307,16 @@
     setRoom(args) {
       const room = normalizeRoom(args.ROOM);
       this.setRoomInternal(room, /*auto*/ false);
+    }
+
+    setModel(args) {
+      const modelId = normalizeModelId(args.MODEL, "hands");
+      if (modelId === this._modelId) return;
+      this._modelId = modelId;
+      this._gesture = "";
+      this._confidence = 0;
+      this._scores = null;
+      this._lastModelId = "";
     }
 
     reconnect() {
@@ -317,6 +365,8 @@
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
+      this._scores = null;
+      this._lastModelId = "";
 
       // (Re)connect
       this._backoffIndex = 0;
@@ -397,11 +447,33 @@
           const msg = safeJsonParse(evt.data);
           if (!msg || typeof msg !== "object") return;
 
-          if (msg.type === "gesture") {
+          if (msg.type === "prediction") {
+            const incomingModelId = normalizeModelId(msg.modelId, "");
+            this._lastModelId = incomingModelId || "";
+            if (!incomingModelId || incomingModelId !== this._modelId) return;
+
+            const label =
+              typeof msg.label === "string"
+                ? msg.label
+                : typeof msg.gesture === "string"
+                ? msg.gesture
+                : "";
+            const conf = toFiniteNumber(
+              msg.confidence,
+              toFiniteNumber(msg.score, 0)
+            );
+            this._gesture = label;
+            this._confidence = conf;
+            this._scores =
+              msg.scores && typeof msg.scores === "object" ? msg.scores : null;
+          } else if (msg.type === "gesture") {
+            if (this._modelId !== "hands") return;
             const label = typeof msg.label === "string" ? msg.label : "";
             const conf = toFiniteNumber(msg.confidence, 0);
             this._gesture = label;
             this._confidence = conf;
+            this._lastModelId = "hands";
+            this._scores = null;
           } else if (msg.type === "presence") {
             const subs = toFiniteNumber(msg.subscribers, this._subscribers);
             this._subscribers = subs;
